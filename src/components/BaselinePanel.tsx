@@ -5,7 +5,10 @@ import type { Baseline, BaselineComparison, ChangeRow, ChangeType, PlanResult } 
 
 interface Props {
   baseline: Baseline | null
-  result: PlanResult
+  /** 最近一次成功发布的规划结果；后台计算 / Worker 异常期间为 null */
+  result: PlanResult | null
+  /** 规划正在后台计算或 Worker 异常：暂停全部基线相关结果与保存操作 */
+  paused: boolean
   comparison: BaselineComparison | null
   onSave: () => void
   onClear: () => void
@@ -235,6 +238,7 @@ function ReflowToggle({
 export default function BaselinePanel({
   baseline,
   result,
+  paused,
   comparison,
   onSave,
   onClear,
@@ -242,8 +246,9 @@ export default function BaselinePanel({
   onReflowChange,
   reflowAvailable,
 }: Props) {
-  const canSave = result.inputErrors.length === 0 && result.segments.length > 0
-  const paused = baseline !== null && result.inputErrors.length > 0
+  const canSave = !paused && !!result && result.inputErrors.length === 0 && result.segments.length > 0
+  const inputInvalid = !!result && result.inputErrors.length > 0
+  const comparisonPaused = baseline !== null && (paused || inputInvalid)
 
   const reflowHint = !baseline
     ? '保存基线后可启用'
@@ -260,11 +265,16 @@ export default function BaselinePanel({
           即可按需求的稳定 ID 对比新旧结果：新增、删除、未变、扩容/缩容、迁移（CIDR 改变）、
           未分配与恢复分配，并汇总地址区间的新占用、释放与净变化。基线仅保存在当前浏览器会话中。
         </p>
+        {paused && (
+          <div className="summary-disabled-note plan-paused-note">
+            规划正在后台重新计算（或计算发生异常），保存基线已暂停；当前输入已保留，结果到达后自动恢复。
+          </div>
+        )}
         <div className="btn-row">
           <button className="primary" onClick={onSave} disabled={!canSave}>
             保存当前规划为基线
           </button>
-          {!canSave && result.inputErrors.length > 0 && (
+          {!canSave && !paused && result && result.inputErrors.length > 0 && (
             <span className="hint-warn">请先消除左侧输入错误</span>
           )}
         </div>
@@ -305,13 +315,19 @@ export default function BaselinePanel({
       />
 
       {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），已暂停基线对比与保存操作；基线与全部输入均已保留，结果到达后自动恢复。
+        </div>
+      )}
+
+      {!paused && inputInvalid && (
         <div className="fail-box baseline-paused">
           <strong>当前输入存在错误，已保留基线并暂停对比。</strong>
           修正左侧输入后将自动恢复对比，基线不会丢失。
         </div>
       )}
 
-      {!paused && comparison && (
+      {!comparisonPaused && comparison && result && (
         <>
           {baseline.parentCidr !== result.parentCidr && (
             <div className="fail-box" style={{ marginBottom: 12 }}>
@@ -390,7 +406,7 @@ export default function BaselinePanel({
         </>
       )}
 
-      {!paused && result.reflow && (
+      {!comparisonPaused && result && result.reflow && (
         <div style={{ marginTop: 18 }}>
           <ReflowReportPanel result={result} />
         </div>

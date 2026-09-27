@@ -15,7 +15,9 @@ import {
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停预演，设备选择与全部参数录入保留并可继续编辑 */
+  paused: boolean
   assignments: HostAssignment[]
   deviceId: string
   payloadRaw: string
@@ -52,6 +54,7 @@ function pieceTag(p: FragPiece): string {
 /** 预演面板：从有效主机登记选发送设备，本地逐跳模拟 IPv4 分片 */
 export default function FragmentPanel({
   result,
+  paused,
   assignments,
   deviceId,
   payloadRaw,
@@ -62,12 +65,15 @@ export default function FragmentPanel({
   onDfChange,
   onHopsChange,
 }: Props) {
-  // 当前有效主机登记（规划 / 登记变化实时重算；失效设备不会出现在清单里）
-  const devices = useMemo(() => listValidDevices(assignments, result), [assignments, result])
-  const planInvalid = result.inputErrors.length > 0
+  // 当前有效主机登记（规划 / 登记变化实时重算；失效设备不会出现在清单里）；规划暂停时清单置空
+  const devices = useMemo(
+    () => (!paused && result ? listValidDevices(assignments, result) : []),
+    [paused, assignments, result],
+  )
+  const planInvalid = !!result && result.inputErrors.length > 0
   const selectedDevice = devices.find((d) => d.id === deviceId) ?? null
   // 已选设备失效（登记被删 / 改址失效 / 所属网段消失）：保留选择与输入，暂停预演
-  const deviceMissing = !planInvalid && deviceId !== '' && !selectedDevice
+  const deviceMissing = !paused && !planInvalid && deviceId !== '' && !selectedDevice
 
   const validation = useMemo(
     () =>
@@ -84,12 +90,12 @@ export default function FragmentPanel({
     errors.find((e) => e.field === field && (hopIndex === undefined || e.hopIndex === hopIndex))
   const mtuErrorOf = (hopIndex: number) => errors.find((e) => e.field === 'mtu' && e.hopIndex === hopIndex)
 
-  // 输入全部合法且设备有效才执行预演；任何字段非法即暂停（保留全部输入）
+  // 输入全部合法且设备有效才执行预演；任何字段非法即暂停（保留全部输入）；规划暂停同样暂停
   const sim = useMemo(() => {
-    if (planInvalid || deviceMissing || errors.length > 0) return null
+    if (paused || planInvalid || deviceMissing || errors.length > 0) return null
     if (!selectedDevice || validation.payloadLen === undefined || !validation.mtus) return null
     return simulateFragments({ payloadLen: validation.payloadLen, df, mtus: validation.mtus })
-  }, [planInvalid, deviceMissing, errors, selectedDevice, validation, df])
+  }, [paused, planInvalid, deviceMissing, errors, selectedDevice, validation, df])
 
   function patchHop(id: string, mtu: string) {
     onHopsChange(hops.map((h) => (h.id === id ? { ...h, mtu } : h)))
@@ -130,12 +136,17 @@ export default function FragmentPanel({
         登记或规划变化实时重算；<strong>设备失效或输入非法时保留选择与全部输入并暂停预演</strong>。
       </p>
 
-      {planInvalid && (
+      {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），分片预演已暂停；发送设备选择与全部参数录入均已保留且可继续编辑，结果到达后自动恢复。
+        </div>
+      )}
+      {!paused && planInvalid && (
         <div className="summary-disabled-note">
           规划输入非法（请先修正左侧错误），分片预演已暂停；发送设备选择与全部参数录入均已保留，修正后自动恢复。
         </div>
       )}
-      {!planInvalid && devices.length === 0 && (
+      {!paused && !planInvalid && devices.length === 0 && (
         <div className="summary-disabled-note">
           当前没有有效主机登记，请先在「⑥ 主机地址分配」中为成功分配的网段登记设备，再回到本面板选择发送设备。
         </div>
@@ -271,16 +282,19 @@ export default function FragmentPanel({
         </span>
       </div>
 
-      {errors.length > 0 && (
+      {/* 规划暂停期间设备清单临时为空，过滤掉该状态下无意义的「未选择设备」提示 */}
+      {errors.filter((e) => !(paused && e.field === 'device')).length > 0 && (
         <div className="opt121-error-box">
-          <strong>输入存在 {errors.length} 处问题，预演已暂停（修正前不会输出逐跳结果）：</strong>
+          <strong>输入存在 {errors.filter((e) => !(paused && e.field === 'device')).length} 处问题，预演已暂停（修正前不会输出逐跳结果）：</strong>
           <ul>
-            {errors.map((e, i) => (
-              <li key={i}>
-                {e.field === 'mtu' ? `第 ${e.hopIndex} 跳 MTU：` : e.field === 'payload' ? '负载字节数：' : '发送设备：'}
-                {e.message}
-              </li>
-            ))}
+            {errors
+              .filter((e) => !(paused && e.field === 'device'))
+              .map((e, i) => (
+                <li key={i}>
+                  {e.field === 'mtu' ? `第 ${e.hopIndex} 跳 MTU：` : e.field === 'payload' ? '负载字节数：' : '发送设备：'}
+                  {e.message}
+                </li>
+              ))}
           </ul>
         </div>
       )}

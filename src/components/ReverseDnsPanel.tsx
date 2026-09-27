@@ -9,7 +9,9 @@ import {
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停区域生成，网段选择保留 */
+  paused: boolean
   assignments: HostAssignment[]
   ownerId: string
   onOwnerChange: (id: string) => void
@@ -45,26 +47,26 @@ async function copyText(text: string): Promise<boolean> {
 type CopyKey = 'zone' | 'parent' | 'child'
 
 /** 反向 DNS 区域文件面板：选择成功网段，读取其中有效且设备名为合法绝对域名的登记 */
-export default function ReverseDnsPanel({ result, assignments, ownerId, onOwnerChange }: Props) {
+export default function ReverseDnsPanel({ result, paused, assignments, ownerId, onOwnerChange }: Props) {
   const [copiedKey, setCopiedKey] = useState<CopyKey | null>(null)
 
-  // 可选对象：当前成功分配的固定 / 自动网段（按地址升序，与规划结果顺序一致）
+  // 可选对象：当前成功分配的固定 / 自动网段（按地址升序，与规划结果顺序一致）；规划暂停时不使用旧结果
   const allocatable = useMemo(() => {
-    if (result.inputErrors.length > 0) return []
+    if (paused || !result || result.inputErrors.length > 0) return []
     return result.segments.filter(isAllocSegment)
-  }, [result])
+  }, [paused, result])
 
-  const invalid = result.inputErrors.length > 0
+  const invalid = !!result && result.inputErrors.length > 0
   const segment = useMemo(
-    () => allocatable.find((s) => s.ownerId === ownerId) ?? null,
-    [allocatable, ownerId],
+    () => (!paused && result ? allocatable.find((s) => s.ownerId === ownerId) ?? null : null),
+    [paused, allocatable, result, ownerId],
   )
-  const segmentMissing = !invalid && allocatable.length > 0 && ownerId !== '' && !segment
+  const segmentMissing = !paused && !invalid && allocatable.length > 0 && ownerId !== '' && !segment
 
   // 网段迁移、登记增删或改址后由 React 记忆化实时重算
   const built = useMemo(
-    () => (segment ? buildReverseDns(assignments, result, segment.ownerId) : null),
-    [assignments, result, segment],
+    () => (!paused && segment && result ? buildReverseDns(assignments, result, segment.ownerId) : null),
+    [paused, segment, assignments, result],
   )
 
   async function handleCopy(key: CopyKey, text: string) {
@@ -95,12 +97,17 @@ export default function ReverseDnsPanel({ result, assignments, ownerId, onOwnerC
         网段迁移、登记增删或改址后实时重算；本面板只读，不修改规划与登记。
       </p>
 
-      {invalid && (
+      {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），反向 DNS 区域生成已暂停；网段选择已保留，结果到达后自动恢复。
+        </div>
+      )}
+      {!paused && invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），反向 DNS 区域生成已暂停；网段选择已保留，修正后自动恢复。
         </div>
       )}
-      {!invalid && allocatable.length === 0 && (
+      {!paused && !invalid && allocatable.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可选网段。</div>
       )}
       {segmentMissing && (

@@ -11,7 +11,9 @@ import { intToIp } from '../lib/ip'
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停预览与应用，CSV 文本保留并可继续编辑 */
+  paused: boolean
   assignments: HostAssignment[]
   csv: string
   onCsvChange: (next: string) => void
@@ -43,6 +45,7 @@ function diffSummary(row: LeaseImportRow): string | null {
 /** 静态租约批量导入面板：粘贴含表头 CSV → 实时预览 → 全部通过后一次性替换登记状态 */
 export default function LeaseImportPanel({
   result,
+  paused,
   assignments,
   csv,
   onCsvChange,
@@ -51,18 +54,21 @@ export default function LeaseImportPanel({
 }: Props) {
   const [appliedNote, setAppliedNote] = useState<string | null>(null)
 
-  const invalid = result.inputErrors.length > 0
+  const invalid = !!result && result.inputErrors.length > 0
 
   // CSV 文本、规划或既有登记任意变化都实时重算预览；原始 CSV 始终原样保留。
-  // 优先使用 App 层共享的计算结果（迁移编排面板复用同一份合并快照）。
+  // 优先使用 App 层共享的计算结果（迁移编排面板复用同一份合并快照）；规划暂停时不回退旧结果。
   const builtFallback = useMemo(
-    () => (invalid || builtProp !== undefined ? null : buildLeaseImport(csv, assignments, result)),
-    [csv, assignments, result, invalid, builtProp],
+    () => (!paused && !invalid && builtProp === undefined && result
+      ? buildLeaseImport(csv, assignments, result)
+      : null),
+    [paused, invalid, builtProp, csv, assignments, result],
   )
-  const built = builtProp ?? builtFallback
+  const built = paused ? null : (builtProp ?? builtFallback)
 
   function handleApply() {
-    if (!built || !built.canApply) return
+    // 计算中 / Worker 异常期间禁止应用租约，避免基于过期规划落库
+    if (paused || !built || !built.canApply) return
     // 全部通过后一次性替换状态（原子应用，避免逐行处理造成的顺序性误报）
     onAssignmentsChange(built.merged)
     setAppliedNote(
@@ -97,14 +103,19 @@ export default function LeaseImportPanel({
         规划变化后原始 CSV 保留、预览自动重算。
       </p>
 
-      {invalid && (
+      {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），批量导入预览与「应用导入」已暂停；原始 CSV 已保留且可继续编辑，结果到达后自动恢复。
+        </div>
+      )}
+      {!paused && invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），静态租约批量导入已暂停；原始 CSV 已保留，修正后预览自动恢复。
         </div>
       )}
 
       <div className="btn-row lease-toolbar">
-        <button onClick={() => onCsvChange(LEASE_IMPORT_SAMPLE)} disabled={invalid}>
+        <button onClick={() => onCsvChange(LEASE_IMPORT_SAMPLE)} disabled={paused || invalid}>
           填入示例 CSV
         </button>
         <button onClick={handleClearCsv} disabled={!hasCsv}>
@@ -121,7 +132,7 @@ export default function LeaseImportPanel({
         rows={8}
         placeholder={'网段 CIDR,设备名,IPv4,MAC\n192.168.10.16/30,网关,192.168.10.17,aa:bb:cc:dd:ee:ff'}
         value={csv}
-        disabled={invalid}
+        disabled={!paused && invalid}
         onChange={(e) => {
           onCsvChange(e.target.value)
           setAppliedNote(null)
@@ -251,7 +262,7 @@ export default function LeaseImportPanel({
         <div className="dnsmasq-empty">CSV 只有表头、没有数据行；粘贴数据后这里将实时显示逐行预览。</div>
       )}
 
-      {!hasCsv && !invalid && (
+      {!paused && !hasCsv && !invalid && (
         <p className="summary-empty">
           尚未粘贴 CSV。可点击「填入示例 CSV」参考格式；支持引号包裹的字段（字段内可含逗号与换行），
           引号必须出现在字段首位、闭引号后只允许逗号或换行，空行会被忽略。

@@ -8,7 +8,9 @@ import {
 import type { DhcpExclusionInput, HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停地址池生成，网段选择与全部排除区间录入保留并可继续编辑 */
+  paused: boolean
   assignments: HostAssignment[]
   ownerId: string
   exclusions: DhcpExclusionInput[]
@@ -56,6 +58,7 @@ async function copyText(text: string): Promise<boolean> {
 /** DHCP 动态地址池面板：选择成功网段，录入手工排除区间，输出 dhcp-range 配置 */
 export default function DhcpPoolPanel({
   result,
+  paused,
   assignments,
   ownerId,
   exclusions,
@@ -64,21 +67,24 @@ export default function DhcpPoolPanel({
 }: Props) {
   const [copied, setCopied] = useState(false)
 
-  // 可作为宿主网段的对象：当前成功分配的固定 / 自动网段（按地址升序）
+  // 可作为宿主网段的对象：当前成功分配的固定 / 自动网段（按地址升序）；规划暂停时不使用旧结果
   const allocatable = useMemo(() => {
-    if (result.inputErrors.length > 0) return []
+    if (paused || !result || result.inputErrors.length > 0) return []
     return result.segments.filter(isAllocSegment)
-  }, [result])
+  }, [paused, result])
 
-  const invalid = result.inputErrors.length > 0
+  const invalid = !!result && result.inputErrors.length > 0
   // 选中的宿主网段在当前规划中失效（规划变化导致删除 / 分配失败）时暂停结果
-  const segment = useMemo(() => resolvePoolSegment(result, ownerId), [result, ownerId])
-  const segmentMissing = !invalid && allocatable.length > 0 && ownerId !== '' && !segment
+  const segment = useMemo(
+    () => (!paused && result ? resolvePoolSegment(result, ownerId) : null),
+    [paused, result, ownerId],
+  )
+  const segmentMissing = !paused && !invalid && allocatable.length > 0 && ownerId !== '' && !segment
 
   // 宿主网段有效时才实时校验与生成；任一录入错误都使整体停止生成（configText 为空）
   const built = useMemo(
-    () => (segment ? buildDhcpPool(exclusions, assignments, result, segment) : null),
-    [exclusions, assignments, result, segment],
+    () => (!paused && segment && result ? buildDhcpPool(exclusions, assignments, result, segment) : null),
+    [paused, segment, exclusions, assignments, result],
   )
 
   function patchExclusion(id: string, patch: Partial<DhcpExclusionInput>) {
@@ -124,12 +130,17 @@ export default function DhcpPoolPanel({
         规划、登记或排除项变化后实时重算；网段失效时暂停结果、录入不丢失。
       </p>
 
-      {invalid && (
+      {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），DHCP 动态地址池生成已暂停；网段选择与全部排除区间录入均已保留且可继续编辑，结果到达后自动恢复。
+        </div>
+      )}
+      {!paused && invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），DHCP 动态地址池生成已暂停；网段选择与全部排除区间录入均已保留，修正后自动恢复。
         </div>
       )}
-      {!invalid && allocatable.length === 0 && (
+      {!paused && !invalid && allocatable.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可选的宿主网段。</div>
       )}
       {segmentMissing && (
@@ -161,7 +172,7 @@ export default function DhcpPoolPanel({
       </div>
 
       <fieldset
-        disabled={!segment}
+        disabled={!paused && !segment}
         className="opt121-fieldset"
         style={{ border: 'none', margin: 0, padding: 0 }}
       >
@@ -187,7 +198,7 @@ export default function DhcpPoolPanel({
         )}
 
         <div className="btn-row opt121-toolbar">
-          <button onClick={addExclusion} disabled={!segment}>
+          <button onClick={addExclusion} disabled={!paused && !segment}>
             + 添加排除区间
           </button>
           <span className="opt121-toolbar-hint">
@@ -257,7 +268,7 @@ export default function DhcpPoolPanel({
           })}
         </div>
 
-        {segment && built && built.mergedManual.length > 0 && (
+        {!paused && segment && built && built.mergedManual.length > 0 && (
           <div className="pool-merged">
             <span className="pool-merged-label">手工区间合并后（重叠 / 相邻自动合并）：</span>
             {built.mergedManual.map((m, i) => (
@@ -270,7 +281,7 @@ export default function DhcpPoolPanel({
           </div>
         )}
 
-        {segment && built && built.hostExclusions.length > 0 && (
+        {!paused && segment && built && built.hostExclusions.length > 0 && (
           <div className="pool-merged">
             <span className="pool-merged-label">自动排除的主机登记：</span>
             {built.hostExclusions.map((h) => (
@@ -283,7 +294,7 @@ export default function DhcpPoolPanel({
         )}
       </fieldset>
 
-      {errors.length > 0 && (
+      {!paused && errors.length > 0 && (
         <div className="opt121-error-box">
           <strong>存在 {errors.length} 处排除区间错误，已停止生成（dhcp-range 配置暂不输出）：</strong>
           <ul>
@@ -296,20 +307,20 @@ export default function DhcpPoolPanel({
         </div>
       )}
 
-      {segment && !hasAnyEntry && (
+      {!paused && segment && !hasAnyEntry && (
         <p className="summary-empty">
           当前不排除任何手工区间：地址池即该网段全部可用主机地址（自动扣除网络地址、广播地址与有效主机登记）。
           添加排除区间或主机登记后，这里将实时展示分段结果与 dnsmasq 配置。
         </p>
       )}
 
-      {segment && built && errors.length === 0 && built.pools.length === 0 && (
+      {!paused && segment && built && errors.length === 0 && built.pools.length === 0 && (
         <div className="dnsmasq-empty">
           可用主机地址已被全部排除（手工区间与有效主机登记覆盖了整个可用范围），暂无可分配地址。
         </div>
       )}
 
-      {canOutput && built && segment && (
+      {!paused && canOutput && built && segment && (
         <div className="opt121-result">
           <div className="dnsmasq-head">
             <h3>

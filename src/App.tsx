@@ -23,13 +23,14 @@ import {
 import { downloadJson } from './lib/exporter'
 import { formatCidr, parseCidr } from './lib/ip'
 import { buildLeaseImport } from './lib/leaseImport'
-import { plan } from './lib/planner'
+import { usePlanner } from './lib/usePlanner'
 import type {
   Baseline,
   DhcpExclusionInput,
   FragHopInput,
   HostAssignment,
   Option121RouteInput,
+  PlannerInput,
   RequirementInput,
   ReservedInput,
 } from './lib/types'
@@ -105,29 +106,48 @@ export default function App() {
     baseline !== null && parentForReflow !== null && parentForReflow === baseline.parentCidr
   const reflowActive = reflowEnabled && reflowAvailable
 
-  const result = useMemo(
-    () => plan({ parentCidr, reservations, requirements, baseline: reflowActive ? baseline : null }),
+  // 规划引擎输入快照：父网段 / 保留区 / 需求 / 基线或重排开关任意变化都会产生新快照，
+  // 由 usePlanner 提交给 Web Worker（带递增版本、终止被替代任务、仅当前版本结果可发布）
+  const plannerInput = useMemo<PlannerInput>(
+    () => ({
+      parentCidr,
+      reservations,
+      requirements,
+      baseline: reflowActive ? baseline : null,
+    }),
     [parentCidr, reservations, requirements, baseline, reflowActive],
   )
+  const { result, busy, status, error } = usePlanner(plannerInput)
+
+  // 新输入产生后立即暂停所有依赖规划的面板结果；仅当前版本完整结果到达后统一恢复
+  const planPaused = busy || status === 'error' || result === null
+  const ready = status === 'ready' && result !== null
 
   // 静态租约批量导入的合并预览在 App 层计算一次，导入面板（应用）与迁移编排（只读）共享；
-  // CSV 文本、规划或既有登记任意变化都实时重算
+  // CSV 文本、规划或既有登记任意变化都实时重算；规划暂停（计算中 / Worker 异常）时一并暂停
   const leaseImport = useMemo(
-    () => (result.inputErrors.length > 0 ? null : buildLeaseImport(leaseImportCsv, hostAssignments, result, leaseUid)),
-    [leaseImportCsv, hostAssignments, result],
+    () =>
+      !ready || result.inputErrors.length > 0
+        ? null
+        : buildLeaseImport(leaseImportCsv, hostAssignments, result, leaseUid),
+    [ready, leaseImportCsv, hostAssignments, result],
   )
 
-  // 输入非法时保留基线但暂停对比
+  // 输入非法时保留基线但暂停对比；规划暂停时同样不展示旧对比
   const comparison = useMemo(
     () =>
-      baseline && result.inputErrors.length === 0 && result.segments.length > 0
+      ready &&
+      baseline &&
+      result.inputErrors.length === 0 &&
+      result.segments.length > 0
         ? compareWithBaseline(baseline, result)
         : null,
-    [baseline, result],
+    [ready, baseline, result],
   )
 
   function handleSaveBaseline() {
-    if (result.inputErrors.length > 0 || result.segments.length === 0) return
+    // 计算中 / Worker 异常时禁止保存基线，避免基于过期结果落库
+    if (!ready || result.inputErrors.length > 0 || result.segments.length === 0) return
     const snapshot = buildBaseline(result)
     setBaseline(snapshot)
     saveBaseline(snapshot)
@@ -146,9 +166,9 @@ export default function App() {
     return map
   }, [comparison])
 
-  // 重新规划后，选中索引可能失效（保留上一次仍在范围内的选择）
+  // 重新规划后，选中索引可能失效（保留上一次仍在范围内的选择）；规划暂停期间也不使用旧选择
   const safeSelected =
-    selectedIndex !== null && selectedIndex < result.segments.length ? selectedIndex : null
+    ready && selectedIndex !== null && selectedIndex < result.segments.length ? selectedIndex : null
 
   function patchReservation(id: string, patch: Partial<ReservedInput>) {
     setReservations((list) => list.map((r) => (r.id === id ? { ...r, ...patch } : r)))
@@ -326,7 +346,28 @@ export default function App() {
 
         {/* 结果区 */}
         <div>
-          {result.inputErrors.length > 0 && (
+          {status === 'computing' && (
+            <div className="plan-status-banner plan-busy" role="status">
+              <span className="plan-spinner" aria-hidden="true" />
+              <div>
+                <strong>规划计算中…</strong>
+                <div className="plan-status-detail">
+                  已暂停各面板结果与保存基线 / 导出 / 应用租约操作；可继续编辑左侧输入，结果到达后统一恢复。
+                </div>
+              </div>
+            </div>
+          )}
+
+          {status === 'error' && (
+            <div className="plan-status-banner plan-error" role="alert">
+              <strong>规划 Worker 异常：{error}</strong>
+              <div className="plan-status-detail">
+                全部输入与录入均已保留，各依赖面板已暂停；再次编辑任意规划输入即会重新提交计算。
+              </div>
+            </div>
+          )}
+
+          {ready && result.inputErrors.length > 0 && (
             <div className="error-list">
               <strong>输入存在问题：</strong>
               <ul>
@@ -337,7 +378,7 @@ export default function App() {
             </div>
           )}
 
-          {result.failures.length > 0 && (
+          {ready && result.failures.length > 0 && (
             <div className="fail-box">
               <strong>以下需求无法分配：</strong>
               <ul>
@@ -350,16 +391,20 @@ export default function App() {
             </div>
           )}
 
-          {reflowActive && result.reflow && (
+          {ready && reflowActive && result.reflow && (
             <ReflowSummaryBar report={result.reflow} />
           )}
 
-          {result.segments.length > 0 && (
+          {ready && result.segments.length > 0 && (
             <>
               <div className="panel">
                 <div className="header-row">
                   <h2 style={{ marginBottom: 0 }}>分配结果 · {result.parentCidr}</h2>
-                  <button className="primary" onClick={() => downloadJson(result, { parentCidr })}>
+                  <button
+                    className="primary"
+                    onClick={() => downloadJson(result, { parentCidr })}
+                    disabled={planPaused}
+                  >
                     ⬇ 导出 JSON
                   </button>
                 </div>
@@ -387,6 +432,7 @@ export default function App() {
       <BaselinePanel
         baseline={baseline}
         result={result}
+        paused={planPaused}
         comparison={comparison}
         onSave={handleSaveBaseline}
         onClear={handleClearBaseline}
@@ -395,16 +441,18 @@ export default function App() {
         reflowAvailable={reflowAvailable}
       />
 
-      <RouteSummaryPanel result={result} />
+      <RouteSummaryPanel result={result} paused={planPaused} />
 
       <HostAddressPanel
         result={result}
+        paused={planPaused}
         assignments={hostAssignments}
         onAssignmentsChange={setHostAssignments}
       />
 
       <Option121Panel
         result={result}
+        paused={planPaused}
         clientId={option121ClientId}
         routes={option121Routes}
         onClientChange={setOption121ClientId}
@@ -413,6 +461,7 @@ export default function App() {
 
       <ReverseDnsPanel
         result={result}
+        paused={planPaused}
         assignments={hostAssignments}
         ownerId={reverseDnsOwnerId}
         onOwnerChange={setReverseDnsOwnerId}
@@ -420,6 +469,7 @@ export default function App() {
 
       <DhcpPoolPanel
         result={result}
+        paused={planPaused}
         assignments={hostAssignments}
         ownerId={dhcpPoolOwnerId}
         exclusions={dhcpPoolExclusions}
@@ -429,6 +479,7 @@ export default function App() {
 
       <LeaseImportPanel
         result={result}
+        paused={planPaused}
         assignments={hostAssignments}
         csv={leaseImportCsv}
         onCsvChange={setLeaseImportCsv}
@@ -436,10 +487,11 @@ export default function App() {
         built={leaseImport}
       />
 
-      <MigrationPanel result={result} assignments={hostAssignments} imported={leaseImport} />
+      <MigrationPanel result={result} paused={planPaused} assignments={hostAssignments} imported={leaseImport} />
 
       <FragmentPanel
         result={result}
+        paused={planPaused}
         assignments={hostAssignments}
         deviceId={fragDeviceId}
         payloadRaw={fragPayload}
@@ -451,7 +503,7 @@ export default function App() {
         onHopsChange={setFragHops}
       />
 
-      {result.segments.length > 0 && (
+      {ready && result.segments.length > 0 && (
         <div className="panel">
           <h2>
             网段明细（点击行查看/高亮）

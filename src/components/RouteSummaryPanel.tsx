@@ -3,7 +3,9 @@ import { blocksToCidrList, summarizeSegments } from '../lib/summary'
 import type { PlanResult, Segment } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停面板（不展示旧结果） */
+  paused: boolean
 }
 
 /** 成功分配、带稳定 ownerId 的固定/自动网段 */
@@ -44,14 +46,14 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export default function RouteSummaryPanel({ result }: Props) {
+export default function RouteSummaryPanel({ result, paused }: Props) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState(false)
 
-  // 可勾选对象：当前成功分配的固定 / 自动网段（稳定 ownerId）
+  // 可勾选对象：当前成功分配的固定 / 自动网段（稳定 ownerId）；规划暂停时不展示旧结果
   const allocatable = useMemo(
-    () => result.segments.filter(isAllocSegment),
-    [result],
+    () => (!paused && result ? result.segments.filter(isAllocSegment) : []),
+    [paused, result],
   )
 
   // 规划变化后，移除已不存在或分配失败的选择（同一 ID 重新成功分配时自动保留）
@@ -61,8 +63,8 @@ export default function RouteSummaryPanel({ result }: Props) {
     [selectedIds, validIds],
   )
 
-  const invalid = result.inputErrors.length > 0
-  const disabled = invalid || allocatable.length === 0
+  const invalid = !!result && result.inputErrors.length > 0
+  const disabled = paused || invalid || allocatable.length === 0
 
   const chosenSegments = useMemo(
     () => allocatable.filter((s) => chosenIds.has(s.ownerId)),
@@ -98,6 +100,7 @@ export default function RouteSummaryPanel({ result }: Props) {
   }
 
   function disabledReason(): string {
+    if (paused) return '规划正在后台重新计算（或计算发生异常），路由汇总已暂停；结果到达后自动恢复。'
     if (invalid) return '输入非法（请先修正左侧错误），路由汇总已禁用。'
     if (allocatable.length === 0) return '当前没有成功分配的固定或自动网段，路由汇总已禁用。'
     return ''

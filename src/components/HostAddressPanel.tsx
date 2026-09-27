@@ -13,7 +13,9 @@ import {
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
-  result: PlanResult
+  result: PlanResult | null
+  /** 规划后台计算中 / Worker 异常：暂停结果展示与登记操作，已有登记全部保留 */
+  paused: boolean
   assignments: HostAssignment[]
   onAssignmentsChange: (next: HostAssignment[]) => void
 }
@@ -424,15 +426,22 @@ function OrphanList({
   )
 }
 
-export default function HostAddressPanel({ result, assignments, onAssignmentsChange }: Props) {
-  const segments = useMemo(() => allocatableSegments(result), [result])
+export default function HostAddressPanel({ result, paused, assignments, onAssignmentsChange }: Props) {
+  // 规划暂停（后台计算 / Worker 异常）时不展示旧网段、不对既有登记做任何校验
+  const segments = useMemo(
+    () => (!paused && result ? allocatableSegments(result) : []),
+    [paused, result],
+  )
   const { rows, statsByOwner } = useMemo(
-    () => reconcileHosts(assignments, result),
-    [assignments, result],
+    () =>
+      !paused && result
+        ? reconcileHosts(assignments, result)
+        : { rows: [], statsByOwner: new Map() as ReturnType<typeof reconcileHosts>['statsByOwner'] },
+    [paused, assignments, result],
   )
 
-  const invalid = result.inputErrors.length > 0
-  const disabled = invalid || segments.length === 0
+  const invalid = !!result && result.inputErrors.length > 0
+  const disabled = paused || invalid || segments.length === 0
   const validCount = rows.filter((r) => r.valid).length
   const invalidRows = rows.filter((r) => !r.valid)
   const orphans = invalidRows.filter(
@@ -472,14 +481,19 @@ export default function HostAddressPanel({ result, assignments, onAssignmentsCha
         失效登记明确标记且<strong>不会被静默改址</strong>。面板底部按当前登记实时生成 dnsmasq 静态租约。
       </p>
 
-      {invalid && (
+      {paused && (
+        <div className="summary-disabled-note plan-paused-note">
+          规划正在后台重新计算（或计算发生异常），主机地址分配与 dnsmasq 租约生成已暂停；全部登记原样保留，结果到达后自动恢复。
+        </div>
+      )}
+      {!paused && invalid && (
         <div className="summary-disabled-note">输入非法（请先修正左侧错误），主机地址分配与 dnsmasq 租约生成已暂停，登记不会丢失。</div>
       )}
-      {!invalid && segments.length === 0 && (
+      {!paused && !invalid && segments.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可登记的网段。</div>
       )}
 
-      {!disabled && (
+      {!paused && !invalid && result && (
         <>
           <OrphanList rows={orphans} onRemove={remove} />
           {segments.map((seg) => {
