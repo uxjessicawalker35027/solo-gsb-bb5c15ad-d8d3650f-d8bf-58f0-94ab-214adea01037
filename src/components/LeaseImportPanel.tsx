@@ -8,6 +8,7 @@ import {
   type LeaseImportStatus,
 } from '../lib/leaseImport'
 import { intToIp } from '../lib/ip'
+import PlanPauseNote from './PlanPauseNote'
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
@@ -18,6 +19,8 @@ interface Props {
   onAssignmentsChange: (next: HostAssignment[]) => void
   /** App 层统一计算的合并预览（与迁移编排面板共享同一份结果）；缺省时由本面板自行计算 */
   built?: LeaseImportResult | null
+  planning?: boolean
+  planError?: string | null
 }
 
 const KIND_LABEL = { fixed: '固定', auto: '自动' } as const
@@ -48,21 +51,24 @@ export default function LeaseImportPanel({
   onCsvChange,
   onAssignmentsChange,
   built: builtProp,
+  planning = false,
+  planError = null,
 }: Props) {
   const [appliedNote, setAppliedNote] = useState<string | null>(null)
 
-  const invalid = result.inputErrors.length > 0
+  const planPaused = planning || planError !== null
+  const invalid = !planPaused && result.inputErrors.length > 0
 
   // CSV 文本、规划或既有登记任意变化都实时重算预览；原始 CSV 始终原样保留。
-  // 优先使用 App 层共享的计算结果（迁移编排面板复用同一份合并快照）。
+  // 规划暂停（计算中 / Worker 异常）时由 App 层传入 null，本面板也不自行回退计算。
   const builtFallback = useMemo(
-    () => (invalid || builtProp !== undefined ? null : buildLeaseImport(csv, assignments, result)),
-    [csv, assignments, result, invalid, builtProp],
+    () => (invalid || planPaused || builtProp !== undefined ? null : buildLeaseImport(csv, assignments, result)),
+    [csv, assignments, result, invalid, planPaused, builtProp],
   )
-  const built = builtProp ?? builtFallback
+  const built = planPaused ? null : (builtProp ?? builtFallback)
 
   function handleApply() {
-    if (!built || !built.canApply) return
+    if (planPaused || !built || !built.canApply) return
     // 全部通过后一次性替换状态（原子应用，避免逐行处理造成的顺序性误报）
     onAssignmentsChange(built.merged)
     setAppliedNote(
@@ -97,6 +103,13 @@ export default function LeaseImportPanel({
         规划变化后原始 CSV 保留、预览自动重算。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="租约导入预览与应用已暂停，原始 CSV 已保留且仍可编辑。"
+        />
+      )}
       {invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），静态租约批量导入已暂停；原始 CSV 已保留，修正后预览自动恢复。
@@ -128,7 +141,7 @@ export default function LeaseImportPanel({
         }}
       />
 
-      {built && built.syntaxError && (
+      {!planPaused && built && built.syntaxError && (
         <div className="opt121-error-box">
           <strong>
             CSV 语法错误（第 {built.syntaxError.line} 行第 {built.syntaxError.column} 列）：
@@ -144,7 +157,7 @@ export default function LeaseImportPanel({
         </div>
       )}
 
-      {built && built.headerErrors.length > 0 && (
+      {!planPaused && built && built.headerErrors.length > 0 && (
         <div className="opt121-error-box">
           <strong>无法识别 CSV 表头：</strong>
           <ul>
@@ -155,7 +168,7 @@ export default function LeaseImportPanel({
         </div>
       )}
 
-      {built && built.rows.length > 0 && (
+      {!planPaused && built && built.rows.length > 0 && (
         <>
           <div className="lease-summary-row">
             <span className="rdns-chip">
@@ -247,11 +260,11 @@ export default function LeaseImportPanel({
         </>
       )}
 
-      {built && !built.syntaxError && built.headerErrors.length === 0 && built.rows.length === 0 && hasCsv && (
+      {!planPaused && built && !built.syntaxError && built.headerErrors.length === 0 && built.rows.length === 0 && hasCsv && (
         <div className="dnsmasq-empty">CSV 只有表头、没有数据行；粘贴数据后这里将实时显示逐行预览。</div>
       )}
 
-      {!hasCsv && !invalid && (
+      {!planPaused && !hasCsv && !invalid && (
         <p className="summary-empty">
           尚未粘贴 CSV。可点击「填入示例 CSV」参考格式；支持引号包裹的字段（字段内可含逗号与换行），
           引号必须出现在字段首位、闭引号后只允许逗号或换行，空行会被忽略。

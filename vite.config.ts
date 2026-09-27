@@ -12,4 +12,8 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
   },
+  // 规划计算运行于 Web Worker（src/workers/planner.worker.ts），由 Vite 一并打包为独立 chunk
+  worker: {
+    format: 'es',
+  },
 })

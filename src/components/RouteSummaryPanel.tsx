@@ -1,9 +1,12 @@
 import { useMemo, useState } from 'react'
 import { blocksToCidrList, summarizeSegments } from '../lib/summary'
+import PlanPauseNote from './PlanPauseNote'
 import type { PlanResult, Segment } from '../lib/types'
 
 interface Props {
   result: PlanResult
+  planning?: boolean
+  planError?: string | null
 }
 
 /** 成功分配、带稳定 ownerId 的固定/自动网段 */
@@ -44,14 +47,16 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export default function RouteSummaryPanel({ result }: Props) {
+export default function RouteSummaryPanel({ result, planning = false, planError = null }: Props) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [copied, setCopied] = useState(false)
 
+  const planPaused = planning || planError !== null
+
   // 可勾选对象：当前成功分配的固定 / 自动网段（稳定 ownerId）
   const allocatable = useMemo(
-    () => result.segments.filter(isAllocSegment),
-    [result],
+    () => (planPaused ? [] : result.segments.filter(isAllocSegment)),
+    [planPaused, result],
   )
 
   // 规划变化后，移除已不存在或分配失败的选择（同一 ID 重新成功分配时自动保留）
@@ -62,7 +67,7 @@ export default function RouteSummaryPanel({ result }: Props) {
   )
 
   const invalid = result.inputErrors.length > 0
-  const disabled = invalid || allocatable.length === 0
+  const disabled = planPaused || invalid || allocatable.length === 0
 
   const chosenSegments = useMemo(
     () => allocatable.filter((s) => chosenIds.has(s.ownerId)),
@@ -98,6 +103,7 @@ export default function RouteSummaryPanel({ result }: Props) {
   }
 
   function disabledReason(): string {
+    if (planPaused) return '' // 由 PlanPauseNote 展示计算中 / 异常提示
     if (invalid) return '输入非法（请先修正左侧错误），路由汇总已禁用。'
     if (allocatable.length === 0) return '当前没有成功分配的固定或自动网段，路由汇总已禁用。'
     return ''
@@ -112,7 +118,14 @@ export default function RouteSummaryPanel({ result }: Props) {
         只有同前缀、连续且同属一个上级网段的块才会聚合；汇总项不包含任何未选需求、保留区或空闲地址。
       </p>
 
-      {disabled && <div className="summary-disabled-note">{disabledReason()}</div>}
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="路由汇总已暂停，网段勾选已保留。"
+        />
+      )}
+      {!planPaused && disabled && <div className="summary-disabled-note">{disabledReason()}</div>}
 
       <fieldset disabled={disabled} style={{ border: 'none', margin: 0, padding: 0 }}>
         <div className="btn-row summary-toolbar">

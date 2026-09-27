@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { isAllocSegment } from '../lib/hosts'
+import PlanPauseNote from './PlanPauseNote'
 import {
   buildOption121,
   downloadOption121Conf,
@@ -13,6 +14,8 @@ interface Props {
   routes: Option121RouteInput[]
   onClientChange: (id: string) => void
   onRoutesChange: (next: Option121RouteInput[]) => void
+  planning?: boolean
+  planError?: string | null
 }
 
 const KIND_LABEL = { fixed: '固定', auto: '自动' } as const
@@ -54,24 +57,29 @@ export default function Option121Panel({
   routes,
   onClientChange,
   onRoutesChange,
+  planning = false,
+  planError = null,
 }: Props) {
   const [copied, setCopied] = useState(false)
 
-  // 可作为客户端网段的对象：当前成功分配的固定 / 自动网段（按地址升序）
-  const allocatable = useMemo(() => {
-    if (result.inputErrors.length > 0) return []
-    return result.segments.filter(isAllocSegment)
-  }, [result])
+  const planPaused = planning || planError !== null
 
-  const invalid = result.inputErrors.length > 0
+  // 可作为客户端网段的对象：当前成功分配的固定 / 自动网段（按地址升序）；
+  // 计算期间沿用上一版清单展示选择，结果生成由 planPaused 统一暂停
+  const allocatable = useMemo(() => {
+    if (!planPaused && result.inputErrors.length > 0) return []
+    return result.segments.filter(isAllocSegment)
+  }, [planPaused, result])
+
+  const invalid = !planPaused && result.inputErrors.length > 0
   // 选中的客户端网段在当前规划中失效（规划变化导致删除 / 分配失败）时暂停结果
   const client = useMemo(() => resolveClientSegment(result, clientId), [result, clientId])
-  const clientMissing = !invalid && allocatable.length > 0 && clientId !== '' && !client
+  const clientMissing = !planPaused && !invalid && allocatable.length > 0 && clientId !== '' && !client
 
-  // 客户端网段有效时才实时校验与编码；任一错误都使整体停止生成（built.optionLine 为空）
+  // 暂停期间不生成合并结果（但路由录入仍可编辑）
   const built = useMemo(
-    () => (client ? buildOption121(routes, client) : null),
-    [routes, client],
+    () => (!planPaused && client ? buildOption121(routes, client) : null),
+    [planPaused, routes, client],
   )
 
   function patchRoute(id: string, patch: Partial<Option121RouteInput>) {
@@ -118,12 +126,19 @@ export default function Option121Panel({
         规划变化后按稳定 ID 保留全部录入并自动重新校验；网段失效时暂停结果、录入不丢失。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="Option 121 结果生成已暂停，客户端网段选择与全部路由录入均已保留且仍可编辑。"
+        />
+      )}
       {invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），Option 121 结果生成已暂停；客户端网段选择与全部路由录入均已保留，修正后自动恢复。
         </div>
       )}
-      {!invalid && allocatable.length === 0 && (
+      {!planPaused && !invalid && allocatable.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可选的客户端网段。</div>
       )}
       {clientMissing && (
@@ -154,13 +169,14 @@ export default function Option121Panel({
         </select>
       </div>
 
+      {/* 计算期间保持录入可编辑：仅暂停生成，不禁用字段集（planPaused 时 built 为 null，不输出结果） */}
       <fieldset
-        disabled={!client}
+        disabled={!client && !planPaused}
         className="opt121-fieldset"
         style={{ border: 'none', margin: 0, padding: 0 }}
       >
         <div className="btn-row opt121-toolbar">
-          <button onClick={addRoute} disabled={!client}>
+          <button onClick={addRoute} disabled={!client && !planPaused}>
             + 添加路由条目
           </button>
           <span className="opt121-toolbar-hint">

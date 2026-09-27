@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { isAllocSegment } from '../lib/hosts'
+import PlanPauseNote from './PlanPauseNote'
 import {
   buildReverseDns,
   downloadClassfulZone,
@@ -13,6 +14,8 @@ interface Props {
   assignments: HostAssignment[]
   ownerId: string
   onOwnerChange: (id: string) => void
+  planning?: boolean
+  planError?: string | null
 }
 
 const KIND_LABEL = { fixed: '固定', auto: '自动' } as const
@@ -45,26 +48,36 @@ async function copyText(text: string): Promise<boolean> {
 type CopyKey = 'zone' | 'parent' | 'child'
 
 /** 反向 DNS 区域文件面板：选择成功网段，读取其中有效且设备名为合法绝对域名的登记 */
-export default function ReverseDnsPanel({ result, assignments, ownerId, onOwnerChange }: Props) {
+export default function ReverseDnsPanel({
+  result,
+  assignments,
+  ownerId,
+  onOwnerChange,
+  planning = false,
+  planError = null,
+}: Props) {
   const [copiedKey, setCopiedKey] = useState<CopyKey | null>(null)
 
-  // 可选对象：当前成功分配的固定 / 自动网段（按地址升序，与规划结果顺序一致）
-  const allocatable = useMemo(() => {
-    if (result.inputErrors.length > 0) return []
-    return result.segments.filter(isAllocSegment)
-  }, [result])
+  const planPaused = planning || planError !== null
 
-  const invalid = result.inputErrors.length > 0
+  // 可选对象：当前成功分配的固定 / 自动网段（按地址升序，与规划结果顺序一致）；
+  // 计算期间沿用上一版清单展示选择，结果生成由 planPaused 统一暂停
+  const allocatable = useMemo(() => {
+    if (!planPaused && result.inputErrors.length > 0) return []
+    return result.segments.filter(isAllocSegment)
+  }, [planPaused, result])
+
+  const invalid = !planPaused && result.inputErrors.length > 0
   const segment = useMemo(
     () => allocatable.find((s) => s.ownerId === ownerId) ?? null,
     [allocatable, ownerId],
   )
-  const segmentMissing = !invalid && allocatable.length > 0 && ownerId !== '' && !segment
+  const segmentMissing = !planPaused && !invalid && allocatable.length > 0 && ownerId !== '' && !segment
 
-  // 网段迁移、登记增删或改址后由 React 记忆化实时重算
+  // 暂停期间不生成区域文件（网段选择保留）
   const built = useMemo(
-    () => (segment ? buildReverseDns(assignments, result, segment.ownerId) : null),
-    [assignments, result, segment],
+    () => (!planPaused && segment ? buildReverseDns(assignments, result, segment.ownerId) : null),
+    [planPaused, assignments, result, segment],
   )
 
   async function handleCopy(key: CopyKey, text: string) {
@@ -95,12 +108,19 @@ export default function ReverseDnsPanel({ result, assignments, ownerId, onOwnerC
         网段迁移、登记增删或改址后实时重算；本面板只读，不修改规划与登记。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="反向 DNS 区域生成已暂停，网段选择已保留。"
+        />
+      )}
       {invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），反向 DNS 区域生成已暂停；网段选择已保留，修正后自动恢复。
         </div>
       )}
-      {!invalid && allocatable.length === 0 && (
+      {!planPaused && !invalid && allocatable.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可选网段。</div>
       )}
       {segmentMissing && (

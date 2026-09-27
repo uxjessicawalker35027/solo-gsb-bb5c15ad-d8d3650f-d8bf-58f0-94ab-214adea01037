@@ -1,6 +1,6 @@
 # IPv4 VLSM 地址规划台
 
-本地运行的 IPv4 可变长子网掩码（VLSM）地址规划工具。基于 **React 18 + TypeScript + Vite**，纯前端计算，数据不离开本机。
+本地运行的 IPv4 可变长子网掩码（VLSM）地址规划工具。基于 **React 18 + TypeScript + Vite**，纯前端计算，数据不离开本机。规划（网段分配）在 **Web Worker** 后台线程中执行：编辑父网段、保留区、需求、基线或重排开关时，输入快照带递增版本提交，旧任务立即终止，只有当前版本的完整结果会被发布；计算期间页面与全部录入保持可编辑，依赖规划的面板统一暂停并显示计算状态，结果到达后自动恢复。
 
 ## 功能
 
@@ -30,7 +30,9 @@
 
 ## 快速开始（Docker Compose，一条命令）
 
-无需额外配置（镜像内自动完成依赖安装、构建与启动）：
+**必要配置：无。** 镜像构建阶段自动完成依赖安装（`npm ci`）与生产构建（`npm run build`，含通过 Vite 一并打包的规划 Web Worker），运行阶段由 nginx 托管静态资源，无需任何环境变量或外部服务。
+
+一条命令启动（构建 + 启动）：
 
 ```bash
 docker compose up --build
@@ -421,6 +423,19 @@ npm run preview      # http://localhost:5173 预览 dist/
 
 > 上例为节选；实际导出包含全部占用段与空闲段（共 6 段，空闲合计 12 个地址）。
 
+## 后台规划（Web Worker）
+
+网段分配计算（`src/lib/planner.ts` 的 `plan()`，算法与结果结构 `PlanResult` 均未改变）运行在专用 **Web Worker**（`src/workers/planner.worker.ts`）中，由 `src/lib/usePlanner.ts` 钩子驱动：
+
+- **带版本的输入快照**：父网段、保留区、需求、基线或「基线优先重排」开关任一变化，立即生成带**递增版本号**的输入快照（`PlannerRequest`）提交给 Worker。
+- **终止被替代的任务**：每次提交前 `terminate()` 旧 Worker，被新输入替代的规划计算同步中止，不会继续占用线程。
+- **只有当前版本可发布**：Worker 回包（`PlannerResponse` / `PlannerFailure`）原样带回版本号；与当前版本不一致的过期消息一律丢弃，旧结果不可能覆盖新结果。
+- **立即暂停、统一恢复**：新输入产生后（绘制前）所有依赖规划的面板即刻暂停——保存基线、导出 JSON、应用静态租约导入及各面板的结果生成均被禁用，页面顶部显示计算状态；当前版本的完整结果到达后统一恢复。
+- **计算期间仍可编辑**：输入区、主机登记、路由 / 排除区间 / CSV / 分片参数等录入全部保留且可继续修改，旧结果仅用于展示与维持编辑上下文，不对外发布。
+- **Worker 异常**：计算抛错或 Worker 报错时页面显示错误信息并暂停依赖面板，输入与全部录入保留；下一次编辑即提交新版本重新计算。
+- **取消时机**：点击「清空」会以空输入快照触发一次新版本提交（旧任务同时被终止），组件卸载时终止 Worker。
+- **构建**：Worker 通过 Vite 的 `new Worker(new URL(...), { type: 'module' })` 方式打包为独立 chunk（见 `vite.config.ts` 的 `worker.format: 'es'`），`npm run build` 与 Docker 镜像构建自动包含，无需额外配置。
+
 ## 目录结构
 
 ```
@@ -433,8 +448,10 @@ npm run preview      # http://localhost:5173 预览 dist/
 ├── vite.config.ts
 └── src
     ├── main.tsx
-    ├── App.tsx             # 录入表单 + 实时规划 + 导出
+    ├── App.tsx             # 录入表单 + Worker 规划调度 + 导出
     ├── styles.css
+    ├── workers
+    │   └── planner.worker.ts  # 规划 Worker：后台执行 plan()，回包带版本号
     ├── components
     │   ├── AddressBar.tsx    # 比例地址条
     │   ├── BaselinePanel.tsx # 基线对比面板（状态徽标/区间汇总/变化地址条）
@@ -446,12 +463,15 @@ npm run preview      # http://localhost:5173 预览 dist/
     │   ├── DhcpPoolPanel.tsx    # DHCP 动态地址池面板（手工排除/自动扣网络广播与登记/dhcp-range/复制下载）
     │   ├── LeaseImportPanel.tsx # 静态租约批量导入面板（CSV 预览/合并快照统一校验/一次性应用）
     │   ├── MigrationPanel.tsx   # 迁移执行编排面板（依赖图/环路临时锚点/逐步改址清单/复制）
+    │   ├── PlanPauseNote.tsx    # 计算中 / Worker 异常时各面板的统一暂停条
     │   ├── SegmentDetail.tsx
     │   ├── SegmentTable.tsx
     │   └── SummaryCards.tsx
     └── lib
         ├── ip.ts           # IPv4/CIDR 数值工具
-        ├── planner.ts      # VLSM 校验与分配引擎
+        ├── planner.ts      # VLSM 校验与分配引擎（在 Worker 中运行）
+        ├── plannerProtocol.ts # Worker 消息协议（带版本快照/结果/异常）与空结果常量
+        ├── usePlanner.ts   # Worker 调度钩子（版本递增/终止旧任务/过期消息丢弃/暂停恢复）
         ├── baseline.ts     # 基线快照、按稳定 ID 对比、区间差集与会话存储
         ├── hosts.ts        # 主机登记：首个未占用地址、手动校验、重算保留/失效
         ├── mac.ts          # MAC 规范化（小写冒号）与全零/组播位/重复校验

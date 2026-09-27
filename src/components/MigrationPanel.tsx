@@ -7,6 +7,7 @@ import {
   type MigrationStepKind,
 } from '../lib/migration'
 import { intToIp } from '../lib/ip'
+import PlanPauseNote from './PlanPauseNote'
 import type { LeaseImportResult } from '../lib/leaseImport'
 import type { HostAssignment, PlanResult } from '../lib/types'
 
@@ -15,6 +16,8 @@ interface Props {
   assignments: HostAssignment[]
   /** 静态租约批量导入的当前合并预览（App 层与导入面板共享同一份计算结果） */
   imported: LeaseImportResult | null
+  planning?: boolean
+  planError?: string | null
 }
 
 /** 复制到剪贴板；非安全上下文（无 navigator.clipboard）时回退到临时 textarea */
@@ -83,15 +86,22 @@ function StepRow({ step }: { step: MigrationStep }) {
  * 生成按序执行时不会产生瞬时重复 IPv4 的逐步改址清单。
  * 纯只读：不应用、不改登记；CSV / 规划 / 登记变化后实时重算。
  */
-export default function MigrationPanel({ result, assignments, imported }: Props) {
+export default function MigrationPanel({
+  result,
+  assignments,
+  imported,
+  planning = false,
+  planError = null,
+}: Props) {
   const [copied, setCopied] = useState(false)
 
-  const invalid = result.inputErrors.length > 0
+  const planPaused = planning || planError !== null
+  const invalid = !planPaused && result.inputErrors.length > 0
 
-  // CSV、规划、既有登记任意变化都立即重算（与导入面板共享同一个 imported 快照）
+  // CSV、规划、既有登记任意变化都立即重算（与导入面板共享同一个 imported 快照）；暂停期间不生成步骤
   const plan = useMemo(
-    () => (invalid || !imported ? null : buildMigrationPlan(imported, assignments, result)),
-    [invalid, imported, assignments, result],
+    () => (!planPaused && !invalid && imported ? buildMigrationPlan(imported, assignments, result) : null),
+    [planPaused, invalid, imported, assignments, result],
   )
   const text = useMemo(() => (plan?.ok ? migrationPlanText(plan) : ''), [plan])
 
@@ -106,7 +116,6 @@ export default function MigrationPanel({ result, assignments, imported }: Props)
 
   const hasCsvData =
     !!imported && !imported.syntaxError && imported.rows.length > 0 && imported.headerErrors.length === 0
-
   return (
     <div className="panel migration-panel">
       <h2>⑪ 迁移执行编排</h2>
@@ -118,26 +127,34 @@ export default function MigrationPanel({ result, assignments, imported }: Props)
         <strong>明确阻止该环</strong>。本模块<strong>只读、不改动登记</strong>；CSV 存在冲突时不产生结果。
       </p>
 
-      {invalid && (
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="迁移执行编排已暂停，原始 CSV 与登记均已保留。"
+        />
+      )}
+
+      {!planPaused && invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），迁移执行编排已暂停；原始 CSV 与登记均已保留，修正后自动重算。
         </div>
       )}
 
-      {!invalid && imported && imported.syntaxError && (
+      {!planPaused && !invalid && imported && imported.syntaxError && (
         <div className="summary-disabled-note">
           CSV 存在语法错误（第 {imported.syntaxError.line} 行第 {imported.syntaxError.column} 列，见上方 ⑩ 面板），
           迁移编排暂不产生结果、登记保持不变；修正后自动重算。
         </div>
       )}
 
-      {!invalid && imported && imported.headerErrors.length > 0 && (
+      {!planPaused && !invalid && imported && imported.headerErrors.length > 0 && (
         <div className="summary-disabled-note">
           CSV 表头无法识别（见上方 ⑩ 面板），迁移编排暂不产生结果；修正表头后自动重算。
         </div>
       )}
 
-      {!invalid && hasCsvData && imported.hasConflicts && (
+      {!planPaused && !invalid && hasCsvData && imported.hasConflicts && (
         <div className="opt121-error-box">
           <strong>CSV 合并预览存在冲突：</strong>
           迁移编排<strong>不生成任何步骤、也不改动登记</strong>。请先在上方 ⑩ 面板修正全部标红冲突行，
@@ -145,7 +162,7 @@ export default function MigrationPanel({ result, assignments, imported }: Props)
         </div>
       )}
 
-      {!invalid && hasCsvData && !imported.hasConflicts && plan && (
+      {!planPaused && !invalid && hasCsvData && !imported.hasConflicts && plan && (
         <>
           {plan.blockers.length > 0 ? (
             <div className="opt121-error-box migration-block-box">
@@ -239,7 +256,7 @@ export default function MigrationPanel({ result, assignments, imported }: Props)
         </>
       )}
 
-      {!invalid && !hasCsvData && (
+      {!planPaused && !invalid && !hasCsvData && (
         <p className="summary-empty">
           尚未粘贴有效的 CSV 数据。请在上方 ⑩ 静态租约批量导入中粘贴含表头的 CSV；预览无冲突后，
           这里会自动给出从现有登记到合并结果的逐步改址清单（含设备、原 / 目标 / 临时地址与每步原因）。

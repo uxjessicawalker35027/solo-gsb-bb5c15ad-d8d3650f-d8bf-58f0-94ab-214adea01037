@@ -23,7 +23,7 @@ import {
 import { downloadJson } from './lib/exporter'
 import { formatCidr, parseCidr } from './lib/ip'
 import { buildLeaseImport } from './lib/leaseImport'
-import { plan } from './lib/planner'
+import { usePlanner } from './lib/usePlanner'
 import type {
   Baseline,
   DhcpExclusionInput,
@@ -105,29 +105,38 @@ export default function App() {
     baseline !== null && parentForReflow !== null && parentForReflow === baseline.parentCidr
   const reflowActive = reflowEnabled && reflowAvailable
 
-  const result = useMemo(
-    () => plan({ parentCidr, reservations, requirements, baseline: reflowActive ? baseline : null }),
+  // 提交给规划 Worker 的输入快照：仅父网段、保留区、需求、基线/重排开关变化会触发重算
+  const plannerInput = useMemo(
+    () => ({ parentCidr, reservations, requirements, baseline: reflowActive ? baseline : null }),
     [parentCidr, reservations, requirements, baseline, reflowActive],
   )
+  const { result, status: planStatus, error: planError } = usePlanner(plannerInput)
+
+  // 新输入产生后立即暂停所有依赖规划的面板；Worker 异常时同样暂停（保留全部录入）
+  const planning = planStatus === 'computing'
+  const planPaused = planning || planError !== null
 
   // 静态租约批量导入的合并预览在 App 层计算一次，导入面板（应用）与迁移编排（只读）共享；
-  // CSV 文本、规划或既有登记任意变化都实时重算
+  // 规划暂停（计算中 / Worker 异常）时不基于结果重算，待当前版本结果到达后统一恢复
   const leaseImport = useMemo(
-    () => (result.inputErrors.length > 0 ? null : buildLeaseImport(leaseImportCsv, hostAssignments, result, leaseUid)),
-    [leaseImportCsv, hostAssignments, result],
+    () =>
+      planPaused || result.inputErrors.length > 0
+        ? null
+        : buildLeaseImport(leaseImportCsv, hostAssignments, result, leaseUid),
+    [planPaused, leaseImportCsv, hostAssignments, result],
   )
 
-  // 输入非法时保留基线但暂停对比
+  // 输入非法或规划暂停时保留基线但暂停对比
   const comparison = useMemo(
     () =>
-      baseline && result.inputErrors.length === 0 && result.segments.length > 0
+      baseline && !planPaused && result.inputErrors.length === 0 && result.segments.length > 0
         ? compareWithBaseline(baseline, result)
         : null,
-    [baseline, result],
+    [baseline, planPaused, result],
   )
 
   function handleSaveBaseline() {
-    if (result.inputErrors.length > 0 || result.segments.length === 0) return
+    if (planPaused || result.inputErrors.length > 0 || result.segments.length === 0) return
     const snapshot = buildBaseline(result)
     setBaseline(snapshot)
     saveBaseline(snapshot)
@@ -326,7 +335,24 @@ export default function App() {
 
         {/* 结果区 */}
         <div>
-          {result.inputErrors.length > 0 && (
+          {planError !== null && (
+            <div className="error-list plan-error-box" role="alert">
+              <strong>规划计算发生异常：</strong>
+              <div className="plan-error-msg mono">{planError}</div>
+              <div className="plan-error-hint">
+                全部输入与录入均已保留；继续编辑父网段、保留区或需求即可自动重新计算。
+              </div>
+            </div>
+          )}
+
+          {planning && (
+            <div className="panel plan-pending" role="status">
+              <span className="plan-spinner" aria-hidden="true" />
+              正在后台计算规划…（可继续编辑，输入与已有录入不会丢失）
+            </div>
+          )}
+
+          {!planPaused && result.inputErrors.length > 0 && (
             <div className="error-list">
               <strong>输入存在问题：</strong>
               <ul>
@@ -337,7 +363,7 @@ export default function App() {
             </div>
           )}
 
-          {result.failures.length > 0 && (
+          {!planPaused && result.failures.length > 0 && (
             <div className="fail-box">
               <strong>以下需求无法分配：</strong>
               <ul>
@@ -350,11 +376,11 @@ export default function App() {
             </div>
           )}
 
-          {reflowActive && result.reflow && (
+          {!planPaused && reflowActive && result.reflow && (
             <ReflowSummaryBar report={result.reflow} />
           )}
 
-          {result.segments.length > 0 && (
+          {!planPaused && result.segments.length > 0 && (
             <>
               <div className="panel">
                 <div className="header-row">
@@ -393,14 +419,18 @@ export default function App() {
         reflowEnabled={reflowEnabled}
         onReflowChange={setReflowEnabled}
         reflowAvailable={reflowAvailable}
+        planning={planning}
+        planError={planError}
       />
 
-      <RouteSummaryPanel result={result} />
+      <RouteSummaryPanel result={result} planning={planning} planError={planError} />
 
       <HostAddressPanel
         result={result}
         assignments={hostAssignments}
         onAssignmentsChange={setHostAssignments}
+        planning={planning}
+        planError={planError}
       />
 
       <Option121Panel
@@ -409,6 +439,8 @@ export default function App() {
         routes={option121Routes}
         onClientChange={setOption121ClientId}
         onRoutesChange={setOption121Routes}
+        planning={planning}
+        planError={planError}
       />
 
       <ReverseDnsPanel
@@ -416,6 +448,8 @@ export default function App() {
         assignments={hostAssignments}
         ownerId={reverseDnsOwnerId}
         onOwnerChange={setReverseDnsOwnerId}
+        planning={planning}
+        planError={planError}
       />
 
       <DhcpPoolPanel
@@ -425,6 +459,8 @@ export default function App() {
         exclusions={dhcpPoolExclusions}
         onOwnerChange={setDhcpPoolOwnerId}
         onExclusionsChange={setDhcpPoolExclusions}
+        planning={planning}
+        planError={planError}
       />
 
       <LeaseImportPanel
@@ -434,9 +470,17 @@ export default function App() {
         onCsvChange={setLeaseImportCsv}
         onAssignmentsChange={setHostAssignments}
         built={leaseImport}
+        planning={planning}
+        planError={planError}
       />
 
-      <MigrationPanel result={result} assignments={hostAssignments} imported={leaseImport} />
+      <MigrationPanel
+        result={result}
+        assignments={hostAssignments}
+        imported={leaseImport}
+        planning={planning}
+        planError={planError}
+      />
 
       <FragmentPanel
         result={result}
@@ -449,9 +493,11 @@ export default function App() {
         onPayloadChange={setFragPayload}
         onDfChange={setFragDf}
         onHopsChange={setFragHops}
+        planning={planning}
+        planError={planError}
       />
 
-      {result.segments.length > 0 && (
+      {!planPaused && result.segments.length > 0 && (
         <div className="panel">
           <h2>
             网段明细（点击行查看/高亮）

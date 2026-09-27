@@ -12,6 +12,7 @@ import {
   type FragHopInput,
   type FragPiece,
 } from '../lib/fragmentation'
+import PlanPauseNote from './PlanPauseNote'
 import type { HostAssignment, PlanResult } from '../lib/types'
 
 interface Props {
@@ -25,6 +26,8 @@ interface Props {
   onPayloadChange: (raw: string) => void
   onDfChange: (df: boolean) => void
   onHopsChange: (hops: FragHopInput[]) => void
+  planning?: boolean
+  planError?: string | null
 }
 
 let hopCounter = 0
@@ -61,13 +64,17 @@ export default function FragmentPanel({
   onPayloadChange,
   onDfChange,
   onHopsChange,
+  planning = false,
+  planError = null,
 }: Props) {
-  // 当前有效主机登记（规划 / 登记变化实时重算；失效设备不会出现在清单里）
+  const planPaused = planning || planError !== null
+  // 当前有效主机登记（规划 / 登记变化实时重算；失效设备不会出现在清单里）。
+  // 计算期间沿用上一版结果列出设备，预演生成由 planPaused 统一暂停。
   const devices = useMemo(() => listValidDevices(assignments, result), [assignments, result])
-  const planInvalid = result.inputErrors.length > 0
+  const planInvalid = !planPaused && result.inputErrors.length > 0
   const selectedDevice = devices.find((d) => d.id === deviceId) ?? null
   // 已选设备失效（登记被删 / 改址失效 / 所属网段消失）：保留选择与输入，暂停预演
-  const deviceMissing = !planInvalid && deviceId !== '' && !selectedDevice
+  const deviceMissing = !planPaused && !planInvalid && deviceId !== '' && !selectedDevice
 
   const validation = useMemo(
     () =>
@@ -84,12 +91,12 @@ export default function FragmentPanel({
     errors.find((e) => e.field === field && (hopIndex === undefined || e.hopIndex === hopIndex))
   const mtuErrorOf = (hopIndex: number) => errors.find((e) => e.field === 'mtu' && e.hopIndex === hopIndex)
 
-  // 输入全部合法且设备有效才执行预演；任何字段非法即暂停（保留全部输入）
+  // 输入全部合法且设备有效才执行预演；任何字段非法或规划暂停时都暂停（保留全部输入）
   const sim = useMemo(() => {
-    if (planInvalid || deviceMissing || errors.length > 0) return null
+    if (planPaused || planInvalid || deviceMissing || errors.length > 0) return null
     if (!selectedDevice || validation.payloadLen === undefined || !validation.mtus) return null
     return simulateFragments({ payloadLen: validation.payloadLen, df, mtus: validation.mtus })
-  }, [planInvalid, deviceMissing, errors, selectedDevice, validation, df])
+  }, [planPaused, planInvalid, deviceMissing, errors, selectedDevice, validation, df])
 
   function patchHop(id: string, mtu: string) {
     onHopsChange(hops.map((h) => (h.id === id ? { ...h, mtu } : h)))
@@ -130,12 +137,19 @@ export default function FragmentPanel({
         登记或规划变化实时重算；<strong>设备失效或输入非法时保留选择与全部输入并暂停预演</strong>。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="分片预演已暂停，发送设备选择与全部参数录入均已保留且仍可编辑。"
+        />
+      )}
       {planInvalid && (
         <div className="summary-disabled-note">
           规划输入非法（请先修正左侧错误），分片预演已暂停；发送设备选择与全部参数录入均已保留，修正后自动恢复。
         </div>
       )}
-      {!planInvalid && devices.length === 0 && (
+      {!planPaused && !planInvalid && devices.length === 0 && (
         <div className="summary-disabled-note">
           当前没有有效主机登记，请先在「⑥ 主机地址分配」中为成功分配的网段登记设备，再回到本面板选择发送设备。
         </div>

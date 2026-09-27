@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import DnsmasqLeases from './DnsmasqLeases'
+import PlanPauseNote from './PlanPauseNote'
 import { intToIp, ipToInt } from '../lib/ip'
 import { checkMac } from '../lib/mac'
 import {
@@ -16,6 +17,8 @@ interface Props {
   result: PlanResult
   assignments: HostAssignment[]
   onAssignmentsChange: (next: HostAssignment[]) => void
+  planning?: boolean
+  planError?: string | null
 }
 
 const KIND_LABEL = { fixed: '固定', auto: '自动' } as const
@@ -424,15 +427,24 @@ function OrphanList({
   )
 }
 
-export default function HostAddressPanel({ result, assignments, onAssignmentsChange }: Props) {
+export default function HostAddressPanel({
+  result,
+  assignments,
+  onAssignmentsChange,
+  planning = false,
+  planError = null,
+}: Props) {
+  const planPaused = planning || planError !== null
+  // 计算期间沿用上一版结果的网段块展示与编辑，结果生成由 planPaused 统一暂停
   const segments = useMemo(() => allocatableSegments(result), [result])
   const { rows, statsByOwner } = useMemo(
     () => reconcileHosts(assignments, result),
     [assignments, result],
   )
 
-  const invalid = result.inputErrors.length > 0
-  const disabled = invalid || segments.length === 0
+  // 计算期间保留上一版结果的网段块与全部录入，仍可编辑；仅暂停租约等结果生成
+  const invalid = !planPaused && result.inputErrors.length > 0
+  const disabled = !planPaused && (invalid || segments.length === 0)
   const validCount = rows.filter((r) => r.valid).length
   const invalidRows = rows.filter((r) => !r.valid)
   const orphans = invalidRows.filter(
@@ -472,10 +484,17 @@ export default function HostAddressPanel({ result, assignments, onAssignmentsCha
         失效登记明确标记且<strong>不会被静默改址</strong>。面板底部按当前登记实时生成 dnsmasq 静态租约。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="设备登记保持原样、仍可增删改，但 dnsmasq 静态租约生成已暂停。"
+        />
+      )}
       {invalid && (
         <div className="summary-disabled-note">输入非法（请先修正左侧错误），主机地址分配与 dnsmasq 租约生成已暂停，登记不会丢失。</div>
       )}
-      {!invalid && segments.length === 0 && (
+      {!planPaused && !invalid && segments.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可登记的网段。</div>
       )}
 
@@ -497,7 +516,7 @@ export default function HostAddressPanel({ result, assignments, onAssignmentsCha
               />
             )
           })}
-          <DnsmasqLeases result={result} assignments={assignments} />
+          {!planPaused && <DnsmasqLeases result={result} assignments={assignments} />}
         </>
       )}
     </div>

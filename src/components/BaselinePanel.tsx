@@ -1,5 +1,6 @@
 import { intToIp } from '../lib/ip'
 import { formatRange } from '../lib/baseline'
+import PlanPauseNote from './PlanPauseNote'
 import ReflowReportPanel from './ReflowReport'
 import type { Baseline, BaselineComparison, ChangeRow, ChangeType, PlanResult } from '../lib/types'
 
@@ -14,6 +15,10 @@ interface Props {
   onReflowChange: (enabled: boolean) => void
   /** 模式当前是否可用（存在基线且父网段与基线一致、输入合法） */
   reflowAvailable: boolean
+  /** 规划 Worker 正在计算新输入（保存基线与对比统一暂停） */
+  planning?: boolean
+  /** 规划 Worker 异常信息 */
+  planError?: string | null
 }
 
 const TYPE_META: Record<ChangeType, { label: string; cls: string }> = {
@@ -241,9 +246,13 @@ export default function BaselinePanel({
   reflowEnabled,
   onReflowChange,
   reflowAvailable,
+  planning = false,
+  planError = null,
 }: Props) {
-  const canSave = result.inputErrors.length === 0 && result.segments.length > 0
-  const paused = baseline !== null && result.inputErrors.length > 0
+  const planPaused = planning || planError !== null
+  // 计算中 / Worker 异常时禁止保存基线（只有当前版本的完整结果可作为基线）
+  const canSave = !planPaused && result.inputErrors.length === 0 && result.segments.length > 0
+  const paused = baseline !== null && (planPaused || result.inputErrors.length > 0)
 
   const reflowHint = !baseline
     ? '保存基线后可启用'
@@ -264,10 +273,15 @@ export default function BaselinePanel({
           <button className="primary" onClick={onSave} disabled={!canSave}>
             保存当前规划为基线
           </button>
-          {!canSave && result.inputErrors.length > 0 && (
+          {!canSave && !planPaused && result.inputErrors.length > 0 && (
             <span className="hint-warn">请先消除左侧输入错误</span>
           )}
         </div>
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="保存基线已暂停。"
+        />
         <ReflowToggle
           enabled={false}
           available={false}
@@ -304,7 +318,15 @@ export default function BaselinePanel({
         hint={reflowHint}
       />
 
-      {paused && (
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="基线对比与重建基线已暂停。"
+        />
+      )}
+
+      {paused && !planPaused && (
         <div className="fail-box baseline-paused">
           <strong>当前输入存在错误，已保留基线并暂停对比。</strong>
           修正左侧输入后将自动恢复对比，基线不会丢失。
@@ -390,7 +412,7 @@ export default function BaselinePanel({
         </>
       )}
 
-      {!paused && result.reflow && (
+      {!paused && !planPaused && result.reflow && (
         <div style={{ marginTop: 18 }}>
           <ReflowReportPanel result={result} />
         </div>

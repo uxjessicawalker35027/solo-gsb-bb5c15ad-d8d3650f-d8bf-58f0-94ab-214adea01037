@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { isAllocSegment } from '../lib/hosts'
+import PlanPauseNote from './PlanPauseNote'
 import {
   buildDhcpPool,
   downloadDhcpPoolConf,
@@ -14,6 +15,8 @@ interface Props {
   exclusions: DhcpExclusionInput[]
   onOwnerChange: (id: string) => void
   onExclusionsChange: (next: DhcpExclusionInput[]) => void
+  planning?: boolean
+  planError?: string | null
 }
 
 const KIND_LABEL = { fixed: '固定', auto: '自动' } as const
@@ -61,24 +64,29 @@ export default function DhcpPoolPanel({
   exclusions,
   onOwnerChange,
   onExclusionsChange,
+  planning = false,
+  planError = null,
 }: Props) {
   const [copied, setCopied] = useState(false)
 
-  // 可作为宿主网段的对象：当前成功分配的固定 / 自动网段（按地址升序）
-  const allocatable = useMemo(() => {
-    if (result.inputErrors.length > 0) return []
-    return result.segments.filter(isAllocSegment)
-  }, [result])
+  const planPaused = planning || planError !== null
 
-  const invalid = result.inputErrors.length > 0
+  // 可作为宿主网段的对象：当前成功分配的固定 / 自动网段（按地址升序）；
+  // 计算期间沿用上一版清单展示选择，结果生成由 planPaused 统一暂停
+  const allocatable = useMemo(() => {
+    if (!planPaused && result.inputErrors.length > 0) return []
+    return result.segments.filter(isAllocSegment)
+  }, [planPaused, result])
+
+  const invalid = !planPaused && result.inputErrors.length > 0
   // 选中的宿主网段在当前规划中失效（规划变化导致删除 / 分配失败）时暂停结果
   const segment = useMemo(() => resolvePoolSegment(result, ownerId), [result, ownerId])
-  const segmentMissing = !invalid && allocatable.length > 0 && ownerId !== '' && !segment
+  const segmentMissing = !planPaused && !invalid && allocatable.length > 0 && ownerId !== '' && !segment
 
-  // 宿主网段有效时才实时校验与生成；任一录入错误都使整体停止生成（configText 为空）
+  // 暂停期间不生成地址池（排除区间录入仍可编辑）
   const built = useMemo(
-    () => (segment ? buildDhcpPool(exclusions, assignments, result, segment) : null),
-    [exclusions, assignments, result, segment],
+    () => (!planPaused && segment ? buildDhcpPool(exclusions, assignments, result, segment) : null),
+    [planPaused, exclusions, assignments, result, segment],
   )
 
   function patchExclusion(id: string, patch: Partial<DhcpExclusionInput>) {
@@ -124,12 +132,19 @@ export default function DhcpPoolPanel({
         规划、登记或排除项变化后实时重算；网段失效时暂停结果、录入不丢失。
       </p>
 
+      {planPaused && (
+        <PlanPauseNote
+          planning={planning}
+          planError={planError}
+          planningText="DHCP 动态地址池生成已暂停，网段选择与全部排除区间录入均已保留且仍可编辑。"
+        />
+      )}
       {invalid && (
         <div className="summary-disabled-note">
           输入非法（请先修正左侧错误），DHCP 动态地址池生成已暂停；网段选择与全部排除区间录入均已保留，修正后自动恢复。
         </div>
       )}
-      {!invalid && allocatable.length === 0 && (
+      {!planPaused && !invalid && allocatable.length === 0 && (
         <div className="summary-disabled-note">当前没有成功分配的固定或自动网段，暂无可选的宿主网段。</div>
       )}
       {segmentMissing && (
